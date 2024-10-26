@@ -20,7 +20,7 @@ use wdk_sys::{
 };
 
 use crate::{
-    queue::echo_queue_initialize,
+    interrupt::echo_interrupt_initialize,
     queue_get_context,
     wdf_object_context::wdf_get_context_type_info,
     wdf_object_get_device_context,
@@ -124,7 +124,7 @@ pub fn echo_device_create(mut device_init: &mut WDFDEVICE_INIT) -> NTSTATUS {
 
         if nt_success(status) {
             // Initialize the I/O Package and any Queues
-            status = unsafe { echo_queue_initialize(device) };
+            status = unsafe { echo_interrupt_initialize(device) };
         }
     }
     status

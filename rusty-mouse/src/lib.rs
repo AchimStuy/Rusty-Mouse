@@ -37,6 +37,7 @@
 
 mod device;
 mod driver;
+mod interrupt;
 mod queue;
 
 #[cfg(not(test))]
