@@ -6,12 +6,15 @@
 //! This is a sample UMDF driver that demonstrates how to use the crates in
 //! windows-driver-rs to create a skeleton of a UMDF driver.
 
-use std::{ffi::CString, slice, string::String};
+use std::{
+    fs,
+    slice,
+    string::String
+};
 
 use wdk::println;
 use wdk_sys::{
     call_unsafe_wdf_function_binding,
-    windows::OutputDebugStringA,
     NTSTATUS,
     PCUNICODE_STRING,
     PDRIVER_OBJECT,
@@ -38,14 +41,11 @@ pub unsafe extern "system" fn driver_entry(
     driver: PDRIVER_OBJECT,
     registry_path: PCUNICODE_STRING,
 ) -> NTSTATUS {
-    // This is an example of directly using OutputDebugStringA binding to print
-    let string = CString::new("Hello World!\n").unwrap();
-
-    // SAFETY: This is safe because `string` is a valid pointer to a null-terminated
-    // string
-    unsafe {
-        OutputDebugStringA(string.as_ptr());
-    }
+    // fs::write(
+    //     "C:\\Users\\User\\Desktop\\rustymouse.txt",
+    //     "Hello World from Rusty Mouse!",
+    // );
+    println!("Hello World from Rusty Mouse!");
 
     let mut driver_config = {
         let wdf_driver_config_size: ULONG;
@@ -120,9 +120,10 @@ pub unsafe extern "system" fn driver_entry(
         //            of the slice must be no larger than `isize::MAX`. This is proven by the below
         //            `debug_assert!`.
         unsafe {
-            debug_assert!(
-                isize::try_from(number_of_slice_elements * core::mem::size_of::<WCHAR>()).is_ok()
-            );
+            debug_assert!(isize::try_from(
+                number_of_slice_elements * core::mem::size_of::<WCHAR>()
+            )
+            .is_ok());
             slice::from_raw_parts(registry_path.Buffer, number_of_slice_elements)
         },
     );
@@ -140,6 +141,10 @@ extern "C" fn evt_driver_device_add(
     _driver: WDFDRIVER,
     mut device_init: *mut WDFDEVICE_INIT,
 ) -> NTSTATUS {
+    // fs::write(
+    //     "C:\\Users\\User\\Desktop\\rustymouse.txt",
+    //     "EvtDriverDeviceAdd Entered!",
+    // );
     println!("EvtDriverDeviceAdd Entered!");
 
     let mut device_handle_output: WDFDEVICE = WDF_NO_HANDLE.cast();
