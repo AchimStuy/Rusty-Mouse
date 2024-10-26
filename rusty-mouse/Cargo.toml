@@ -21,6 +21,7 @@ test = false
 wdk-build = "0.3.0"
 
 [dependencies]
+paste = "1"
 wdk = "0.3.0"
 wdk-alloc = "0.3.0"
 wdk-panic = "0.3.0"

@@ -1,177 +1,102 @@
-// Copyright (c) Microsoft Corporation
+// Copyright (c) Microsoft Corporation.
 // License: MIT OR Apache-2.0
 
-//! # Sample KMDF Driver
+//! # Abstract
 //!
-//! This is a sample KMDF driver that demonstrates how to use the crates in
-//! windows-driver-rs to create a skeleton of a kmdf driver.
+//!    This driver demonstrates use of a default I/O Queue, its
+//!    request start events, cancellation event, and a synchronized DPC.
+//!
+//!    To demonstrate asynchronous operation, the I/O requests are not completed
+//!    immediately, but stored in the drivers private data structure, and a
+//!    timer DPC will complete it next time the DPC runs.
+//!
+//!    During the time the request is waiting for the DPC to run, it is
+//!    made cancellable by the call `WdfRequestMarkCancelable`. This
+//!    allows the test program to cancel the request and exit instantly.
+//!
+//!    This rather complicated set of events is designed to demonstrate
+//!    the driver frameworks synchronization of access to a device driver
+//!    data structure, and a pointer which can be a proxy for device hardware
+//!    registers or resources.
+//!
+//!    This common data structure, or resource is accessed by new request
+//!    events arriving, the DPC that completes it, and cancel processing.
+//!
+//!    Notice the lack of specific lock/unlock operations.
+//!
+//!    Even though this example utilizes a serial queue, a parallel queue
+//!    would not need any additional explicit synchronization, just a
+//!    strategy for managing multiple requests outstanding.
 
 #![no_std]
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
+#![warn(clippy::nursery)]
+#![warn(clippy::cargo)]
+#![allow(clippy::missing_safety_doc)]
 
-extern crate alloc;
+mod device;
+mod driver;
+mod queue;
 
 #[cfg(not(test))]
 extern crate wdk_panic;
 
-use alloc::{slice, string::String};
-
-use wdk::println;
+use wdk::wdf;
 #[cfg(not(test))]
 use wdk_alloc::WdkAllocator;
 use wdk_sys::{
     call_unsafe_wdf_function_binding,
-    DRIVER_OBJECT,
+    ntddk::KeGetCurrentIrql,
+    GUID,
     NTSTATUS,
-    PCUNICODE_STRING,
-    PDRIVER_OBJECT,
+    PVOID,
     ULONG,
-    UNICODE_STRING,
-    WCHAR,
-    WDFDEVICE,
-    WDFDEVICE_INIT,
-    WDFDRIVER,
-    WDF_DRIVER_CONFIG,
-    WDF_NO_HANDLE,
-    WDF_NO_OBJECT_ATTRIBUTES,
+    WDFOBJECT,
+    WDFREQUEST,
+    WDF_OBJECT_CONTEXT_TYPE_INFO,
 };
+mod wdf_object_context;
+use core::sync::atomic::AtomicI32;
+
+use wdf_object_context::{wdf_declare_context_type, wdf_declare_context_type_with_name};
 
 #[cfg(not(test))]
 #[global_allocator]
 static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
 
-/// `DriverEntry` function required by WDF
-///
-/// # Panics
-/// Can panic from unwraps of `CStrings` used internally
-///
-/// # Safety
-/// Function is unsafe since it dereferences raw pointers passed to it from WDF
-#[export_name = "DriverEntry"] // WDF expects a symbol with the name DriverEntry
-pub unsafe extern "system" fn driver_entry(
-    driver: &mut DRIVER_OBJECT,
-    registry_path: PCUNICODE_STRING,
-) -> NTSTATUS {
-    println!("Hello World from Rusty Mouse!");
+// {CDC35B6E-0BE4-4936-BF5F-5537380A7C1A}
+const GUID_DEVINTERFACE_ECHO: GUID = GUID {
+    Data1: 0xCDC3_5B6Eu32,
+    Data2: 0x0BE4u16,
+    Data3: 0x4936u16,
+    Data4: [
+        0xBFu8, 0x5Fu8, 0x55u8, 0x37u8, 0x38u8, 0x0Au8, 0x7Cu8, 0x1Au8,
+    ],
+};
 
-    driver.DriverUnload = Some(driver_exit);
+// Declare queue context.
+//
+// ====== CONTEXT SETUP ========//
 
-    let mut driver_config = {
-        let wdf_driver_config_size: ULONG;
-
-        // clippy::cast_possible_truncation cannot currently check compile-time constants: https://github.com/rust-lang/rust-clippy/issues/9613
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            const WDF_DRIVER_CONFIG_SIZE: usize = core::mem::size_of::<WDF_DRIVER_CONFIG>();
-
-            // Manually assert there is not truncation since clippy doesn't work for
-            // compile-time constants
-            const { assert!(WDF_DRIVER_CONFIG_SIZE <= ULONG::MAX as usize) }
-
-            wdf_driver_config_size = WDF_DRIVER_CONFIG_SIZE as ULONG;
-        }
-
-        WDF_DRIVER_CONFIG {
-            Size: wdf_driver_config_size,
-            EvtDriverDeviceAdd: Some(evt_driver_device_add),
-            ..WDF_DRIVER_CONFIG::default()
-        }
-    };
-
-    let driver_attributes = WDF_NO_OBJECT_ATTRIBUTES;
-    let driver_handle_output = WDF_NO_HANDLE.cast::<WDFDRIVER>();
-
-    let wdf_driver_create_ntstatus;
-    // SAFETY: This is safe because:
-    //         1. `driver` is provided by `DriverEntry` and is never null
-    //         2. `registry_path` is provided by `DriverEntry` and is never null
-    //         3. `driver_attributes` is allowed to be null
-    //         4. `driver_config` is a valid pointer to a valid `WDF_DRIVER_CONFIG`
-    //         5. `driver_handle_output` is expected to be null
-    unsafe {
-        wdf_driver_create_ntstatus = call_unsafe_wdf_function_binding!(
-            WdfDriverCreate,
-            driver as PDRIVER_OBJECT,
-            registry_path,
-            driver_attributes,
-            &mut driver_config,
-            driver_handle_output,
-        );
-    }
-
-    // Translate UTF16 string to rust string
-    let registry_path: UNICODE_STRING =
-        // SAFETY: This dereference is safe since `registry_path` is:
-        //         * provided by `DriverEntry` and is never null
-        //         * a valid pointer to a `UNICODE_STRING`
-        unsafe { *registry_path };
-    let number_of_slice_elements = {
-        registry_path.Length as usize
-            / core::mem::size_of_val(
-                // SAFETY: This dereference is safe since `Buffer` is:
-                //         * provided by `DriverEntry` and is never null
-                //         * a valid pointer to `Buffer`'s type
-                &unsafe { *registry_path.Buffer },
-            )
-    };
-
-    let registry_path = String::from_utf16_lossy(
-        // SAFETY: This is safe because:
-        //         1. `registry_path.Buffer` is valid for reads for `number_of_slice_elements` *
-        //            `core::mem::size_of::<WCHAR>()` bytes, and is guaranteed to be aligned and it
-        //            must be properly aligned.
-        //         2. `registry_path.Buffer` points to `number_of_slice_elements` consecutive
-        //            properly initialized values of type `WCHAR`.
-        //         3. Windows does not mutate the memory referenced by the returned slice for for
-        //            its entire lifetime.
-        //         4. The total size, `number_of_slice_elements` * `core::mem::size_of::<WCHAR>()`,
-        //            of the slice must be no larger than `isize::MAX`. This is proven by the below
-        //            `debug_assert!`.
-        unsafe {
-            debug_assert!(isize::try_from(
-                number_of_slice_elements * core::mem::size_of::<WCHAR>()
-            )
-            .is_ok());
-            slice::from_raw_parts(registry_path.Buffer, number_of_slice_elements)
-        },
-    );
-
-    // It is much better to use the println macro that has an implementation in
-    // wdk::print.rs to call DbgPrint. The println! implementation in
-    // wdk::print.rs has the same features as the one in std (ex. format args
-    // support).
-    println!("KMDF Driver Entry Complete! Driver Registry Parameter Key: {registry_path}");
-
-    wdf_driver_create_ntstatus
+// The device context performs the same job as
+// a WDM device extension in the driver frameworks
+pub struct DeviceContext {
+    private_device_data: ULONG, // just a placeholder
 }
+wdf_declare_context_type!(DeviceContext);
 
-extern "C" fn evt_driver_device_add(
-    _driver: WDFDRIVER,
-    mut device_init: *mut WDFDEVICE_INIT,
-) -> NTSTATUS {
-    println!("EvtDriverDeviceAdd Entered!");
-
-    let mut device_handle_output: WDFDEVICE = WDF_NO_HANDLE.cast();
-
-    let ntstatus;
-    // SAFETY: This is safe because:
-    //       1. `device_init` is provided by `EvtDriverDeviceAdd` and is never null
-    //       2. the argument receiving `WDF_NO_OBJECT_ATTRIBUTES` is allowed to be
-    //          null
-    //       3. `device_handle_output` is expected to be null
-    unsafe {
-        ntstatus = call_unsafe_wdf_function_binding!(
-            WdfDeviceCreate,
-            &mut device_init,
-            WDF_NO_OBJECT_ATTRIBUTES,
-            &mut device_handle_output,
-        );
-    }
-
-    println!("WdfDeviceCreate NTSTATUS: {ntstatus:#02x}");
-    ntstatus
+pub struct QueueContext {
+    buffer: PVOID,
+    length: usize,
+    timer: wdf::Timer,
+    current_request: WDFREQUEST,
+    current_status: NTSTATUS,
+    spin_lock: wdf::SpinLock,
 }
+wdf_declare_context_type_with_name!(QueueContext, queue_get_context);
 
-extern "C" fn driver_exit(_driver: *mut DRIVER_OBJECT) {
-    println!("Goodbye World!");
-    println!("Driver Exit Complete!");
+pub struct RequestContext {
+    cancel_completion_ownership_count: AtomicI32,
 }
+wdf_declare_context_type_with_name!(RequestContext, request_get_context);
