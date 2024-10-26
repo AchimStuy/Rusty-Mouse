@@ -8,9 +8,9 @@ categories = ["hardware-support"]
 publish = false
 
 [package.metadata.wdk.driver-model]
-driver-type = "UMDF"
-umdf-version-major = 2
-target-umdf-version-minor = 31
+driver-type = "KMDF"
+kmdf-version-major = 1
+target-kmdf-version-minor = 33
 
 [lib]
 crate-type = ["cdylib"]
@@ -22,4 +22,12 @@ wdk-build = "0.3.0"
 
 [dependencies]
 wdk = "0.3.0"
+wdk-alloc = "0.3.0"
+wdk-panic = "0.3.0"
 wdk-sys = "0.3.0"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

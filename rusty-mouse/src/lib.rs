@@ -1,20 +1,26 @@
 // Copyright (c) Microsoft Corporation
 // License: MIT OR Apache-2.0
 
-//! # Sample UMDF Driver
+//! # Sample KMDF Driver
 //!
-//! This is a sample UMDF driver that demonstrates how to use the crates in
-//! windows-driver-rs to create a skeleton of a UMDF driver.
+//! This is a sample KMDF driver that demonstrates how to use the crates in
+//! windows-driver-rs to create a skeleton of a kmdf driver.
 
-use std::{
-    fs,
-    slice,
-    string::String
-};
+#![no_std]
+
+extern crate alloc;
+
+#[cfg(not(test))]
+extern crate wdk_panic;
+
+use alloc::{slice, string::String};
 
 use wdk::println;
+#[cfg(not(test))]
+use wdk_alloc::WdkAllocator;
 use wdk_sys::{
     call_unsafe_wdf_function_binding,
+    DRIVER_OBJECT,
     NTSTATUS,
     PCUNICODE_STRING,
     PDRIVER_OBJECT,
@@ -29,6 +35,10 @@ use wdk_sys::{
     WDF_NO_OBJECT_ATTRIBUTES,
 };
 
+#[cfg(not(test))]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
+
 /// `DriverEntry` function required by WDF
 ///
 /// # Panics
@@ -38,14 +48,12 @@ use wdk_sys::{
 /// Function is unsafe since it dereferences raw pointers passed to it from WDF
 #[export_name = "DriverEntry"] // WDF expects a symbol with the name DriverEntry
 pub unsafe extern "system" fn driver_entry(
-    driver: PDRIVER_OBJECT,
+    driver: &mut DRIVER_OBJECT,
     registry_path: PCUNICODE_STRING,
 ) -> NTSTATUS {
-    // fs::write(
-    //     "C:\\Users\\User\\Desktop\\rustymouse.txt",
-    //     "Hello World from Rusty Mouse!",
-    // );
     println!("Hello World from Rusty Mouse!");
+
+    driver.DriverUnload = Some(driver_exit);
 
     let mut driver_config = {
         let wdf_driver_config_size: ULONG;
@@ -65,7 +73,6 @@ pub unsafe extern "system" fn driver_entry(
         WDF_DRIVER_CONFIG {
             Size: wdf_driver_config_size,
             EvtDriverDeviceAdd: Some(evt_driver_device_add),
-            EvtDriverUnload: Some(evt_driver_unload),
             ..WDF_DRIVER_CONFIG::default()
         }
     };
@@ -83,7 +90,7 @@ pub unsafe extern "system" fn driver_entry(
     unsafe {
         wdf_driver_create_ntstatus = call_unsafe_wdf_function_binding!(
             WdfDriverCreate,
-            driver,
+            driver as PDRIVER_OBJECT,
             registry_path,
             driver_attributes,
             &mut driver_config,
@@ -129,10 +136,10 @@ pub unsafe extern "system" fn driver_entry(
     );
 
     // It is much better to use the println macro that has an implementation in
-    // wdk::print.rs to call OutputDebugStringA. The println! implementation in
+    // wdk::print.rs to call DbgPrint. The println! implementation in
     // wdk::print.rs has the same features as the one in std (ex. format args
     // support).
-    println!("UMDF Driver Entry Complete! Driver Registry Parameter Key: {registry_path}");
+    println!("KMDF Driver Entry Complete! Driver Registry Parameter Key: {registry_path}");
 
     wdf_driver_create_ntstatus
 }
@@ -141,10 +148,6 @@ extern "C" fn evt_driver_device_add(
     _driver: WDFDRIVER,
     mut device_init: *mut WDFDEVICE_INIT,
 ) -> NTSTATUS {
-    // fs::write(
-    //     "C:\\Users\\User\\Desktop\\rustymouse.txt",
-    //     "EvtDriverDeviceAdd Entered!",
-    // );
     println!("EvtDriverDeviceAdd Entered!");
 
     let mut device_handle_output: WDFDEVICE = WDF_NO_HANDLE.cast();
@@ -168,7 +171,7 @@ extern "C" fn evt_driver_device_add(
     ntstatus
 }
 
-extern "C" fn evt_driver_unload(_driver: WDFDRIVER) {
+extern "C" fn driver_exit(_driver: *mut DRIVER_OBJECT) {
     println!("Goodbye World!");
     println!("Driver Exit Complete!");
 }
